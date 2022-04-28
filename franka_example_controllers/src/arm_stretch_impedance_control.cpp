@@ -170,9 +170,8 @@ void ArmStretchImpedanceController::update(const ros::Time& /*time*/,
   // coordT << 0.7071, -0.7071, 0, 0.7071, 0.7071, 0, 0, 0, 1;
   // coordTransformMatrix.topLeftCorner(size/2, size/2) = coordT;
   // ----------------------------------using topic to assign reorientation------
-  // coordTransformMatrix.topLeftCorner(size/2, size/2) = rotation_matrix_translational_stiffness_;
+  coordTransformMatrix.topLeftCorner(size/2, size/2) = rotation_matrix_translational_stiffness_;
   std::cout << "The reorient matrix is: " << '\n' <<rotation_matrix_translational_stiffness_ << '\n';
-  std::cout << "Approx Identity?" << Eigen::MatrixXd::Identity(3,3).isApprox(rotation_matrix_translational_stiffness_ * rotation_matrix_translational_stiffness_.transpose()) << '\n';
   // ---------------------------------------------------------------------------
   Eigen::Map<Eigen::Matrix<double, 7, 1> > q(robot_state.q.data());
   Eigen::Map<Eigen::Matrix<double, 7, 1> > dq(robot_state.dq.data());
