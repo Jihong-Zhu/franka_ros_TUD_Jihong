@@ -62,6 +62,7 @@ add_library(franka_example_controllers
   src/joint_impedance_example_controller.cpp
   src/cartesian_impedance_example_controller.cpp
   src/dual_arm_cartesian_impedance_example_controller.cpp
+  src/arm_stretch_impedance_control.cpp
 )
 
 add_dependencies(franka_example_controllers

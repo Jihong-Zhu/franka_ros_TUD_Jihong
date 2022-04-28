@@ -1,6 +1,6 @@
 // Copyright (c) 2017 Franka Emika GmbH
 // Use of this source code is governed by the Apache-2.0 license, see LICENSE
-#include <franka_example_controllers/cartesian_impedance_example_controller.h>
+#include <franka_example_controllers/arm_stretch_impedance_control.h>
 
 #include <cmath>
 
@@ -12,20 +12,24 @@
 #include "pseudo_inversion.h"
 namespace franka_example_controllers {
 
-bool CartesianImpedanceExampleController::init(hardware_interface::RobotHW* robot_hw,
+bool ArmStretchImpedanceController::init(hardware_interface::RobotHW* robot_hw,
                                                ros::NodeHandle& node_handle) {
   std::vector<double> cartesian_stiffness_vector;
   std::vector<double> cartesian_damping_vector;
 
+  // subscriber for rotational matrix
+  sub_rotation_mat_ = node_handle.subscribe("/rotation_matrix_3", 20, &ArmStretchImpedanceController::stiffnessReorientation, this,
+  ros::TransportHints().reliable().tcpNoDelay());
+
   sub_equilibrium_pose_ = node_handle.subscribe(
-      "/equilibrium_pose", 20, &CartesianImpedanceExampleController::equilibriumPoseCallback, this,
+      "/equilibrium_pose", 20, &ArmStretchImpedanceController::equilibriumPoseCallback, this,
       ros::TransportHints().reliable().tcpNoDelay());
   sub_equilibrium_config_ = node_handle.subscribe(
-      "/equilibrium_configuration", 20, &CartesianImpedanceExampleController::equilibriumConfigurationCallback, this,
+      "/equilibrium_configuration", 20, &ArmStretchImpedanceController::equilibriumConfigurationCallback, this,
       ros::TransportHints().reliable().tcpNoDelay());
   // We want to add the subscriber to the note for reading the desired stiffness in the different directions
   sub_stiffness_ = node_handle.subscribe(
-    "/stiffness", 20, &CartesianImpedanceExampleController::equilibriumStiffnessCallback, this,
+    "/stiffness", 20, &ArmStretchImpedanceController::equilibriumStiffnessCallback, this,
     ros::TransportHints().reliable().tcpNoDelay());
 
   pub_stiff_update_ = node_handle.advertise<dynamic_reconfigure::Config>(
@@ -37,13 +41,13 @@ bool CartesianImpedanceExampleController::init(hardware_interface::RobotHW* robo
 
   std::string arm_id;
   if (!node_handle.getParam("arm_id", arm_id)) {
-    ROS_ERROR_STREAM("CartesianImpedanceExampleController: Could not read parameter arm_id");
+    ROS_ERROR_STREAM("ArmStretchImpedanceController: Could not read parameter arm_id");
     return false;
   }
   std::vector<std::string> joint_names;
   if (!node_handle.getParam("joint_names", joint_names) || joint_names.size() != 7) {
     ROS_ERROR(
-        "CartesianImpedanceExampleController: Invalid or no joint_names parameters provided, "
+        "ArmStretchImpedanceController: Invalid or no joint_names parameters provided, "
         "aborting controller init!");
     return false;
   }
@@ -52,7 +56,7 @@ bool CartesianImpedanceExampleController::init(hardware_interface::RobotHW* robo
       robot_hw->get<franka_hw::FrankaModelInterface>();
   if (model_interface == nullptr) {
     ROS_ERROR_STREAM(
-        "CartesianImpedanceExampleController: Error getting model interface from hardware");
+        "ArmStretchImpedanceController: Error getting model interface from hardware");
     return false;
   }
   try {
@@ -60,7 +64,7 @@ bool CartesianImpedanceExampleController::init(hardware_interface::RobotHW* robo
         new franka_hw::FrankaModelHandle(model_interface->getHandle(arm_id + "_model")));
   } catch (hardware_interface::HardwareInterfaceException& ex) {
     ROS_ERROR_STREAM(
-        "CartesianImpedanceExampleController: Exception getting model handle from interface: "
+        "ArmStretchImpedanceController: Exception getting model handle from interface: "
         << ex.what());
     return false;
   }
@@ -69,7 +73,7 @@ bool CartesianImpedanceExampleController::init(hardware_interface::RobotHW* robo
       robot_hw->get<franka_hw::FrankaStateInterface>();
   if (state_interface == nullptr) {
     ROS_ERROR_STREAM(
-        "CartesianImpedanceExampleController: Error getting state interface from hardware");
+        "ArmStretchImpedanceController: Error getting state interface from hardware");
     return false;
   }
   try {
@@ -77,7 +81,7 @@ bool CartesianImpedanceExampleController::init(hardware_interface::RobotHW* robo
         new franka_hw::FrankaStateHandle(state_interface->getHandle(arm_id + "_robot")));
   } catch (hardware_interface::HardwareInterfaceException& ex) {
     ROS_ERROR_STREAM(
-        "CartesianImpedanceExampleController: Exception getting state handle from interface: "
+        "ArmStretchImpedanceController: Exception getting state handle from interface: "
         << ex.what());
     return false;
   }
@@ -86,7 +90,7 @@ bool CartesianImpedanceExampleController::init(hardware_interface::RobotHW* robo
       robot_hw->get<hardware_interface::EffortJointInterface>();
   if (effort_joint_interface == nullptr) {
     ROS_ERROR_STREAM(
-        "CartesianImpedanceExampleController: Error getting effort joint interface from hardware");
+        "ArmStretchImpedanceController: Error getting effort joint interface from hardware");
     return false;
   }
   for (size_t i = 0; i < 7; ++i) {
@@ -94,7 +98,7 @@ bool CartesianImpedanceExampleController::init(hardware_interface::RobotHW* robo
       joint_handles_.push_back(effort_joint_interface->getHandle(joint_names[i]));
     } catch (const hardware_interface::HardwareInterfaceException& ex) {
       ROS_ERROR_STREAM(
-          "CartesianImpedanceExampleController: Exception getting joint handles: " << ex.what());
+          "ArmStretchImpedanceController: Exception getting joint handles: " << ex.what());
       return false;
     }
   }
@@ -106,10 +110,12 @@ bool CartesianImpedanceExampleController::init(hardware_interface::RobotHW* robo
       new dynamic_reconfigure::Server<franka_example_controllers::compliance_paramConfig>(
           dynamic_reconfigure_compliance_param_node_));
   dynamic_server_compliance_param_->setCallback(
-      boost::bind(&CartesianImpedanceExampleController::complianceParamCallback, this, _1, _2));
+      boost::bind(&ArmStretchImpedanceController::complianceParamCallback, this, _1, _2));
 
   position_d_.setZero();
   orientation_d_.coeffs() << 0.0, 0.0, 0.0, 1.0;
+  // initialize the rotation matrix as identity
+  rotation_matrix_translational_stiffness_ = Eigen::MatrixXd::Identity(3, 3);
   //position_d_target_.setZero();
   //orientation_d_target_.coeffs() << 0.0, 0.0, 0.0, 1.0;
   cartesian_stiffness_.setZero();
@@ -120,7 +126,7 @@ bool CartesianImpedanceExampleController::init(hardware_interface::RobotHW* robo
   return true;
 }
 
-void CartesianImpedanceExampleController::starting(const ros::Time& /*time*/) {
+void ArmStretchImpedanceController::starting(const ros::Time& /*time*/) {
   // compute initial velocity with jacobian and set x_attractor and q_d_nullspace
   // to initial configuration
   franka::RobotState initial_state = state_handle_->getRobotState();
@@ -143,7 +149,7 @@ void CartesianImpedanceExampleController::starting(const ros::Time& /*time*/) {
   double time_old=ros::Time::now().toSec();
 }
 
-void CartesianImpedanceExampleController::update(const ros::Time& /*time*/,
+void ArmStretchImpedanceController::update(const ros::Time& /*time*/,
                                                  const ros::Duration& /*period*/) {
   // get state variables
   franka::RobotState robot_state = state_handle_->getRobotState();
@@ -156,13 +162,17 @@ void CartesianImpedanceExampleController::update(const ros::Time& /*time*/,
   // convert to Eigen
   Eigen::Map<Eigen::Matrix<double, 7, 1> > coriolis(coriolis_array.data());
   Eigen::Map<Eigen::Matrix<double, 6, 7> > jacobian(jacobian_array.data());
-  // define new coordinate-----NOT WORKING DONT TRY-------------------------
   const int size = 6;
   Eigen::MatrixXd coordTransformMatrix = Eigen::MatrixXd::Identity(size, size);
+  // ----------------------------------test self defined reorientation----------
   // Eigen::Transform coordT;
   // Eigen::Matrix3d coordT;
   // coordT << 0.7071, -0.7071, 0, 0.7071, 0.7071, 0, 0, 0, 1;
   // coordTransformMatrix.topLeftCorner(size/2, size/2) = coordT;
+  // ----------------------------------using topic to assign reorientation------
+  // coordTransformMatrix.topLeftCorner(size/2, size/2) = rotation_matrix_translational_stiffness_;
+  std::cout << "The reorient matrix is: " << '\n' <<rotation_matrix_translational_stiffness_ << '\n';
+  std::cout << "Approx Identity?" << Eigen::MatrixXd::Identity(3,3).isApprox(rotation_matrix_translational_stiffness_ * rotation_matrix_translational_stiffness_.transpose()) << '\n';
   // ---------------------------------------------------------------------------
   Eigen::Map<Eigen::Matrix<double, 7, 1> > q(robot_state.q.data());
   Eigen::Map<Eigen::Matrix<double, 7, 1> > dq(robot_state.dq.data());
@@ -297,7 +307,7 @@ void CartesianImpedanceExampleController::update(const ros::Time& /*time*/,
   orientation_d_ = Eigen::Quaterniond(aa_orientation_d);
 }
 
-Eigen::Matrix<double, 7, 1> CartesianImpedanceExampleController::saturateTorqueRate(
+Eigen::Matrix<double, 7, 1> ArmStretchImpedanceController::saturateTorqueRate(
     const Eigen::Matrix<double, 7, 1>& tau_d_calculated,
     const Eigen::Matrix<double, 7, 1>& tau_J_d) {  // NOLINT (readability-identifier-naming)
   Eigen::Matrix<double, 7, 1> tau_d_saturated{};
@@ -309,7 +319,7 @@ Eigen::Matrix<double, 7, 1> CartesianImpedanceExampleController::saturateTorqueR
   return tau_d_saturated;
 }
 
-void CartesianImpedanceExampleController::equilibriumStiffnessCallback(
+void ArmStretchImpedanceController::equilibriumStiffnessCallback(
     const std_msgs::Float32MultiArray::ConstPtr& stiffness_){
 
   int i = 0;
@@ -390,7 +400,7 @@ void CartesianImpedanceExampleController::equilibriumStiffnessCallback(
 
 }
 
-void CartesianImpedanceExampleController::complianceParamCallback(
+void ArmStretchImpedanceController::complianceParamCallback(
     franka_example_controllers::compliance_paramConfig& config,
     uint32_t /*level*/) {
   cartesian_stiffness_target_.setIdentity();
@@ -412,7 +422,7 @@ void CartesianImpedanceExampleController::complianceParamCallback(
 
 
 
-void CartesianImpedanceExampleController::equilibriumPoseCallback(
+void ArmStretchImpedanceController::equilibriumPoseCallback(
     const geometry_msgs::PoseStampedConstPtr& msg) {
   position_d_ << msg->pose.position.x, msg->pose.position.y, msg->pose.position.z;
   Eigen::Quaterniond last_orientation_d_(orientation_d_);
@@ -422,7 +432,30 @@ void CartesianImpedanceExampleController::equilibriumPoseCallback(
     orientation_d_.coeffs() << -orientation_d_.coeffs();
 }
 }
-void CartesianImpedanceExampleController::equilibriumConfigurationCallback( const std_msgs::Float32MultiArray::ConstPtr& joint) {
+
+void ArmStretchImpedanceController::stiffnessReorientation(const std_msgs::Float32MultiArray::ConstPtr& rotation_matrix_flattened)
+{
+  int i = 0;
+  double flat_vector[9];
+  for(std::vector<float>::const_iterator it = rotation_matrix_flattened->data.begin(); it != rotation_matrix_flattened->data.end(); ++it)
+  {
+    flat_vector[i] = double(*it);
+    i++;
+  }
+  Eigen::Matrix3d rotation_matrix = Eigen::Map<Eigen::Matrix3d>(flat_vector).transpose();
+  rotation_matrix_translational_stiffness_ = rotation_matrix;
+  // if (Eigen::MatrixXd::Identity(3,3).isApprox(rotation_matrix * rotation_matrix.transpose()))
+  // {
+  //   rotation_matrix_translational_stiffness_ = rotation_matrix;
+  // }
+  // else
+  // {
+  //   std::cout << "The re-orientation matrix is not a proper transformation matrix, using the old values" << '\n';
+  // }
+}
+
+
+void ArmStretchImpedanceController::equilibriumConfigurationCallback( const std_msgs::Float32MultiArray::ConstPtr& joint) {
   int i = 0;
   for(std::vector<float>::const_iterator it = joint->data.begin(); it != joint->data.end(); ++it)
   {
@@ -435,5 +468,5 @@ void CartesianImpedanceExampleController::equilibriumConfigurationCallback( cons
 
 }  // namespace franka_example_controllers
 
-PLUGINLIB_EXPORT_CLASS(franka_example_controllers::CartesianImpedanceExampleController,
+PLUGINLIB_EXPORT_CLASS(franka_example_controllers::ArmStretchImpedanceController,
                        controller_interface::ControllerBase)
